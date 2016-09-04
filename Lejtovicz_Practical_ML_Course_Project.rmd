@@ -1,0 +1,195 @@
+---
+title: "ML Course Project Homework - Predicting the manner of performed barebell lifts"
+author: "Lejtovicz Katalin"
+output: html_document
+---
+
+##Installing packages
+
+installing packages and loading libraries needed for the project  
+
+```{r eval=FALSE}
+install.packages("fields")
+install.packages("caret")
+install.packages("ggplot2")
+install.packages("RANN")
+install.packages("rpart")
+install.packages("rattle")
+install.packages("randomForest")
+install.packages("gbm")
+install.packages("MASS")
+install.packages("kernlab")
+
+library(caret)
+library(ggplot2)
+library(fields)
+library(RANN)
+library(rpart)
+library(rattle)
+library(randomForest)
+library(gbm)
+library(MASS)
+library(kernlab)
+```
+
+Set the seed, so that the results are reproducible.
+```{r eval=FALSE}
+set.seed(1000)
+```
+
+##Preprocessing
+
+Read in train and test data from the URL given.
+na.strings=c("NA","#DIV/0!",""): treat NA, #DIV/0! and "" strings as missing values 
+```{r eval=FALSE}
+trainFileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testFileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+training <- read.csv(url(trainFileUrl), na.strings=c("NA","#DIV/0!",""))
+testing <- read.csv(url(testFileUrl), na.strings=c("NA","#DIV/0!",""))
+```
+
+Store the number of coloums for the training and test set in separate variables
+```{r eval=FALSE}
+col_nums_testing <- length(colnames(testing))-1
+col_nums_training <- length(colnames(training))-1
+```
+
+Check if all the coloums are the same in testing and training data
+```{r eval=FALSE}
+all.equal(colnames(testing)[col_nums_testing], colnames(training)[col_nums_training])
+```
+
+Here I throw out the first 6 coloumns, as they only contain metadata (eg. user name, time stamp, etc.), which cannot be used for prediction.
+```{r eval=FALSE}
+training <- training[,-c(1:6)]
+summary(training)
+```
+
+In the next preprocessing step I remove the coloumns, where the percentage of missing data exceeds 50%
+```{r eval=FALSE}
+training <- training[, -which(colMeans(is.na(training)) > 0.5)]
+dim(training)
+```
+
+Define the index of the coloumn that contains the classe variable 
+```{r eval=FALSE}
+col_num_classe <- which(colnames(training)=="classe")
+col_num_classe
+```
+
+Rule out predictors that take a unique value across samples. These features are uninformative for the prediction.
+```{r eval=FALSE}
+nzv_obj <- nearZeroVar(training[, -col_num_classe], saveMetrics = TRUE)
+training <- training[, !nzv_obj$nzv]
+dim(training)
+```
+
+col_num_classe has to be defined again, because if near zero variance predictors were removed, the dataset has changed
+```{r eval=FALSE}
+col_num_classe <- which(colnames(training)=="classe")
+col_num_classe
+```
+
+Find correlation between predictors. 
+```{r eval=FALSE}
+correlation <- findCorrelation(cor(training[, -col_num_classe]), cutoff=0.8)
+names(training)[correlation]
+```
+
+Following variables are highly correlated
+```{r eval=FALSE}
+[1] "accel_belt_z"     "roll_belt"        "accel_belt_y"     "accel_dumbbell_z" "accel_belt_x"     "pitch_belt"       "accel_arm_x"      "accel_dumbbell_x"
+[9] "magnet_arm_y"     "gyros_dumbbell_x" "gyros_forearm_y"  "gyros_dumbbell_z" "gyros_arm_x"     
+```
+
+After preprocessing let's look at the dimensions of the training data, and the predictors left.
+```{r eval=FALSE}
+dim(training)
+names(training)
+```
+
+```{r eval=FALSE}
+[1] 19622    54
+```
+
+```{r eval=FALSE}
+[1] "num_window"           "roll_belt"            "pitch_belt"           "yaw_belt"             "total_accel_belt"     "gyros_belt_x"        
+[7] "gyros_belt_y"         "gyros_belt_z"         "accel_belt_x"         "accel_belt_y"         "accel_belt_z"         "magnet_belt_x"       
+[13] "magnet_belt_y"        "magnet_belt_z"        "roll_arm"             "pitch_arm"            "yaw_arm"              "total_accel_arm"     
+[19] "gyros_arm_x"          "gyros_arm_y"          "gyros_arm_z"          "accel_arm_x"          "accel_arm_y"          "accel_arm_z"         
+[25] "magnet_arm_x"         "magnet_arm_y"         "magnet_arm_z"         "roll_dumbbell"        "pitch_dumbbell"       "yaw_dumbbell"        
+[31] "total_accel_dumbbell" "gyros_dumbbell_x"     "gyros_dumbbell_y"     "gyros_dumbbell_z"     "accel_dumbbell_x"     "accel_dumbbell_y"    
+[37] "accel_dumbbell_z"     "magnet_dumbbell_x"    "magnet_dumbbell_y"    "magnet_dumbbell_z"    "roll_forearm"         "pitch_forearm"       
+[43] "yaw_forearm"          "total_accel_forearm"  "gyros_forearm_x"      "gyros_forearm_y"      "gyros_forearm_z"      "accel_forearm_x"     
+[49] "accel_forearm_y"      "accel_forearm_z"      "magnet_forearm_x"     "magnet_forearm_y"     "magnet_forearm_z"     "classe"   
+```
+
+As we saw in the line 'names(training)[correlation]' many predictors are highly correlated, therefore PCA (principal componant analysis) will be performed during preprocessing. I used a a 10 fold cross-validation to iteratively split the training data into train and test sets. This way it is ensured that the same transformations/preprocessing steps were performed on the train and test sets.
+
+```{r eval=FALSE}
+tc <- trainControl(method = "cv", number = 10, verboseIter=FALSE , preProcOptions="pca", allowParallel=TRUE)
+```
+
+##Building the prediction models
+
+I tried out four models: random forest, boosted tree, linear discriminant analysis and support vector machines. After building the models, I looked at how they performed (Accuracy, Kappa), and chose the two best performing to predict the values in the test dataset. 
+
+```{r eval=FALSE}
+#1. RANDOM FOREST
+
+rf <- train(classe ~ ., data = training, method = "rf", trControl= tc)
+#accuracy of random forest model
+max(rf$results$Accuracy)
+#Kappa of random forest model
+max(rf$results$Kappa)
+
+#2. GBM - BOOSTING WITH TREES
+
+gbm <- train(classe ~ ., data = training, method = "gbm", trControl= tc)
+#accuracy of gbm model
+max(gbm$results$Accuracy)
+#Kappa of gbm model
+max(gbm$results$Kappa)
+
+#3 LINEAR DISCRIMINANT ANALYSIS
+lda <- train(classe ~ ., data = training, method = "lda", trControl= tc)
+#accuracy of lda model
+max(lda$results$Accuracy)
+#Kappa of lda model
+max(lda$results$Kappa)
+
+#4 SUPPORT VECTOR MACHINES
+svmLinear <- train(classe ~ ., data = training, method = "svmLinear", trControl= tc)
+#accuracy of svm model
+max(svmLinear$results$Accuracy)
+#Kappa of svm model
+max(svmLinear$results$Kappa)
+```
+
+
+The random forest and boosted tree were the two best performing models. I used these two to predict the outcome on the testing set.
+```{r eval=FALSE}
+> max(rf$results$Accuracy)
+[1] 0.9986238
+> max(rf$results$Kappa)
+[1] 0.9982593
+```
+
+```{r eval=FALSE}
+max(gbm$results$Accuracy)
+[1] 0.988635
+max(gbm$results$Kappa)
+[1] 0.9856225
+```
+
+##Predicting with the models
+
+Prediction of the outcome with random forest and boosted tree. Both predictions resulted in the same classe values.
+```{r eval=FALSE}
+rfPred <- predict(rf, testing)
+rfPred
+
+gbmPred <- predict(gbm, testing)
+gbmPred
+```
+
