@@ -1,0 +1,405 @@
+---
+title: "ML Course Project Homework - Predicting the manner of performed barebell lifts"
+author: "Lejtovicz Katalin"
+output: html_document
+---
+
+##Installing packages
+
+installing packages and loading libraries needed for the project  
+
+```{r eval=FALSE}
+install.packages("fields")
+install.packages("caret")
+install.packages("ggplot2")
+install.packages("RANN")
+install.packages("rpart")
+install.packages("rattle")
+install.packages("randomForest")
+install.packages("gbm")
+install.packages("MASS")
+install.packages("kernlab")
+
+library(caret)
+library(ggplot2)
+library(fields)
+library(RANN)
+library(rpart)
+library(rattle)
+library(randomForest)
+library(gbm)
+library(MASS)
+library(kernlab)
+```
+
+Set the seed, so that the results are reproducible.
+```{r eval=FALSE}
+set.seed(1000)
+```
+
+##Preprocessing
+
+Read in train and test data from the URL given.
+na.strings=c("NA","#DIV/0!",""): treat NA, #DIV/0! and "" strings as missing values 
+```{r eval=FALSE}
+trainFileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testFileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+training <- read.csv(url(trainFileUrl), na.strings=c("NA","#DIV/0!",""))
+testing <- read.csv(url(testFileUrl), na.strings=c("NA","#DIV/0!",""))
+```
+
+Store the number of coloums for the training and test set in separate variables
+```{r eval=FALSE}
+col_nums_testing <- length(colnames(testing))-1
+col_nums_training <- length(colnames(training))-1
+```
+
+Check if all the coloums are the same in testing and training data
+```{r eval=FALSE}
+all.equal(colnames(testing)[col_nums_testing], colnames(training)[col_nums_training])
+```
+
+Here I throw out the first 6 coloumns, as they only contain metadata (eg. user name, time stamp, etc.), which cannot be used for prediction.
+```{r eval=FALSE}
+training <- training[,-c(1:6)]
+summary(training)
+```
+
+In the next preprocessing step I remove the coloumns, where the percentage of missing data exceeds 50%
+```{r eval=FALSE}
+training <- training[, -which(colMeans(is.na(training)) > 0.5)]
+dim(training)
+```
+
+Define the index of the coloumn that contains the classe variable 
+```{r eval=FALSE}
+col_num_classe <- which(colnames(training)=="classe")
+col_num_classe
+```
+
+Rule out predictors that take a unique value across samples. These features are uninformative for the prediction.
+```{r eval=FALSE}
+nzv_obj <- nearZeroVar(training[, -col_num_classe], saveMetrics = TRUE)
+training <- training[, !nzv_obj$nzv]
+dim(training)
+```
+
+col_num_classe has to be defined again, because if near zero variance predictors were removed, the dataset has changed
+```{r eval=FALSE}
+col_num_classe <- which(colnames(training)=="classe")
+col_num_classe
+```
+
+Find correlation between predictors. 
+```{r eval=FALSE}
+correlation <- findCorrelation(cor(training[, -col_num_classe]), cutoff=0.8)
+names(training)[correlation]
+```
+
+Following variables are highly correlated
+```{r eval=FALSE}
+[1] "accel_belt_z"     "roll_belt"        "accel_belt_y"     "accel_dumbbell_z" "accel_belt_x"     "pitch_belt"       "accel_arm_x"      "accel_dumbbell_x"
+[9] "magnet_arm_y"     "gyros_dumbbell_x" "gyros_forearm_y"  "gyros_dumbbell_z" "gyros_arm_x"     
+```
+
+After preprocessing let's look at the dimensions of the training data, and the predictors left.
+```{r eval=FALSE}
+dim(training)
+names(training)
+```
+
+```{r eval=FALSE}
+[1] 19622    54
+```
+
+```{r eval=FALSE}
+[1] "num_window"           "roll_belt"            "pitch_belt"           "yaw_belt"             "total_accel_belt"     "gyros_belt_x"        
+[7] "gyros_belt_y"         "gyros_belt_z"         "accel_belt_x"         "accel_belt_y"         "accel_belt_z"         "magnet_belt_x"       
+[13] "magnet_belt_y"        "magnet_belt_z"        "roll_arm"             "pitch_arm"            "yaw_arm"              "total_accel_arm"     
+[19] "gyros_arm_x"          "gyros_arm_y"          "gyros_arm_z"          "accel_arm_x"          "accel_arm_y"          "accel_arm_z"         
+[25] "magnet_arm_x"         "magnet_arm_y"         "magnet_arm_z"         "roll_dumbbell"        "pitch_dumbbell"       "yaw_dumbbell"        
+[31] "total_accel_dumbbell" "gyros_dumbbell_x"     "gyros_dumbbell_y"     "gyros_dumbbell_z"     "accel_dumbbell_x"     "accel_dumbbell_y"    
+[37] "accel_dumbbell_z"     "magnet_dumbbell_x"    "magnet_dumbbell_y"    "magnet_dumbbell_z"    "roll_forearm"         "pitch_forearm"       
+[43] "yaw_forearm"          "total_accel_forearm"  "gyros_forearm_x"      "gyros_forearm_y"      "gyros_forearm_z"      "accel_forearm_x"     
+[49] "accel_forearm_y"      "accel_forearm_z"      "magnet_forearm_x"     "magnet_forearm_y"     "magnet_forearm_z"     "classe"   
+```
+
+
+
+
+##Creating a cross-validation dataset
+
+In order to estimate the out of sample error with cross-validation, I split the dataset into two parts, one will be used for training (70%), the other part (30%) will be used for testing. 
+
+```{r eval=FALSE}
+inTrain <- createDataPartition(training$classe, p=0.7, list=FALSE)
+trainingData <- training[inTrain, ]
+crossValidationData <- training[-inTrain, ]
+```
+
+##Building the prediction models
+
+As we saw in the line 'names(training)[correlation]' many predictors are highly correlated, therefore PCA (principal componant analysis) will be performed during preprocessing. I used a 5 fold cross-validation to iteratively split the training data into train and test sets. 
+
+```{r eval=FALSE}
+tc <- trainControl(method = "cv", number = 5, verboseIter=FALSE , preProcOptions="pca", allowParallel=TRUE)
+```
+
+I tried out four models: random forest, boosted tree, linear discriminant analysis and support vector machines. After building the models, I looked at how they performed (Accuracy, Kappa), and chose the two best performing to predict the values in the test dataset. 
+
+```{r eval=FALSE}
+#1. RANDOM FOREST
+rf <- train(classe ~ ., data = training, method = "rf", trControl= tc)
+rf
+```
+
+```{r eval=FALSE}
+Random Forest 
+
+13737 samples
+   53 predictor
+    5 classes: 'A', 'B', 'C', 'D', 'E' 
+
+No pre-processing
+Resampling: Cross-Validated (5 fold) 
+Summary of sample sizes: 10989, 10990, 10990, 10989, 10990 
+Resampling results across tuning parameters:
+
+  mtry  Accuracy   Kappa    
+   2    0.9941034  0.9925410
+  27    0.9971609  0.9964088
+  53    0.9954866  0.9942911
+
+Accuracy was used to select the optimal model using  the largest value.
+The final value used for the model was mtry = 27. 
+```
+
+```{r eval=FALSE}
+#2. GBM - BOOSTING WITH TREES
+gbm <- train(classe ~ ., data = training, method = "gbm", trControl= tc)
+gbm
+```
+
+```{r eval=FALSE}
+Stochastic Gradient Boosting 
+
+13737 samples
+   53 predictor
+    5 classes: 'A', 'B', 'C', 'D', 'E' 
+
+No pre-processing
+Resampling: Cross-Validated (5 fold) 
+Summary of sample sizes: 10989, 10990, 10989, 10991, 10989 
+Resampling results across tuning parameters:
+
+  interaction.depth  n.trees  Accuracy   Kappa    
+  1                   50      0.7560589  0.6905331
+  1                  100      0.8324944  0.7879338
+  1                  150      0.8708580  0.8366211
+  2                   50      0.8854171  0.8549679
+  2                  100      0.9405246  0.9247656
+  2                  150      0.9638198  0.9542285
+  3                   50      0.9349188  0.9176362
+  3                  100      0.9709534  0.9632514
+  3                  150      0.9858043  0.9820433
+
+Tuning parameter 'shrinkage' was held constant at a value of 0.1
+Tuning parameter 'n.minobsinnode' was
+ held constant at a value of 10
+Accuracy was used to select the optimal model using  the largest value.
+The final values used for the model were n.trees = 150, interaction.depth = 3, shrinkage = 0.1 and
+ n.minobsinnode = 10. 
+```
+
+```{r eval=FALSE}
+#3 LINEAR DISCRIMINANT ANALYSIS
+lda <- train(classe ~ ., data = training, method = "lda", trControl= tc)
+lda
+```
+
+```{r eval=FALSE}
+Linear Discriminant Analysis 
+
+13737 samples
+   53 predictor
+    5 classes: 'A', 'B', 'C', 'D', 'E' 
+
+No pre-processing
+Resampling: Cross-Validated (5 fold) 
+Summary of sample sizes: 10990, 10989, 10989, 10990, 10990 
+Resampling results:
+
+  Accuracy   Kappa    
+  0.7104899  0.6334839
+  
+```
+
+```{r eval=FALSE}
+#4 SUPPORT VECTOR MACHINES
+svmLinear <- train(classe ~ ., data = training, method = "svmLinear", trControl= tc)
+svmLinear
+```
+
+```{r eval=FALSE}
+Support Vector Machines with Linear Kernel 
+
+13737 samples
+   53 predictor
+    5 classes: 'A', 'B', 'C', 'D', 'E' 
+
+No pre-processing
+Resampling: Cross-Validated (5 fold) 
+Summary of sample sizes: 10990, 10989, 10991, 10990, 10988 
+Resampling results:
+
+  Accuracy   Kappa   
+  0.7878731  0.730462
+
+Tuning parameter 'C' was held constant at a value of 1
+```
+
+##Out of sample error
+As we saw by looking at the models above, the random forest and boosted trees have the highest Accuracy and Kappa values. In this step I estimate the performance of the random forest and boosted trees models on the cross validation dataset.
+
+###Random forest model
+
+Let's look at the confusion matrix:
+```{r eval=FALSE}
+predictRf <- predict(rf, crossValidationData)
+confusionMatrix(crossValidationData$classe, predictRf)
+```
+
+```{r eval=FALSE}
+Confusion Matrix and Statistics
+
+          Reference
+Prediction    A    B    C    D    E
+         A 1674    0    0    0    0
+         B    7 1131    1    0    0
+         C    0    2 1024    0    0
+         D    0    0    5  959    0
+         E    0    0    0    5 1077
+
+Overall Statistics
+                                          
+               Accuracy : 0.9966          
+                 95% CI : (0.9948, 0.9979)
+    No Information Rate : 0.2856          
+    P-Value [Acc > NIR] : < 2.2e-16       
+                                          
+                  Kappa : 0.9957          
+ Mcnemars Test P-Value : NA              
+
+Statistics by Class:
+
+                     Class: A Class: B Class: C Class: D Class: E
+Sensitivity            0.9958   0.9982   0.9942   0.9948   1.0000
+Specificity            1.0000   0.9983   0.9996   0.9990   0.9990
+Pos Pred Value         1.0000   0.9930   0.9981   0.9948   0.9954
+Neg Pred Value         0.9983   0.9996   0.9988   0.9990   1.0000
+Prevalence             0.2856   0.1925   0.1750   0.1638   0.1830
+Detection Rate         0.2845   0.1922   0.1740   0.1630   0.1830
+Detection Prevalence   0.2845   0.1935   0.1743   0.1638   0.1839
+Balanced Accuracy      0.9979   0.9983   0.9969   0.9969   0.9995
+```
+
+Accuracy and Kappa:
+```{r eval=FALSE}
+accuracyRf <- postResample(predictRf, crossValidationData$classe)
+accuracyRf
+```
+
+```{r eval=FALSE}
+ Accuracy     Kappa 
+0.9966015 0.9957008 
+```
+
+The estimated out of sample error:
+```{r eval=FALSE}
+outOfSampleErrorRf <- 1 - as.numeric(confusionMatrix(crossValidationData$classe, predictRf)$overall[1])
+outOfSampleErrorRf
+```
+
+```{r eval=FALSE}
+[1] 0.003398471
+```
+
+###Boosted tree model
+
+Let's look at the confusion matrix:
+```{r eval=FALSE}
+predictGbm <- predict(gbm, crossValidationData)
+confusionMatrix(crossValidationData$classe, predictGbm)
+```
+
+```{r eval=FALSE}
+Confusion Matrix and Statistics
+
+          Reference
+Prediction    A    B    C    D    E
+         A 1668    5    0    1    0
+         B   26 1107    6    0    0
+         C    0   15 1009    1    1
+         D    1    5   19  939    0
+         E    0    1    3   15 1063
+
+Overall Statistics
+                                          
+               Accuracy : 0.9832          
+                 95% CI : (0.9796, 0.9863)
+    No Information Rate : 0.288           
+    P-Value [Acc > NIR] : < 2.2e-16       
+                                          
+                  Kappa : 0.9787          
+ Mcnemars Test P-Value : NA              
+
+Statistics by Class:
+
+                     Class: A Class: B Class: C Class: D Class: E
+Sensitivity            0.9841   0.9771   0.9730   0.9822   0.9991
+Specificity            0.9986   0.9933   0.9965   0.9949   0.9961
+Pos Pred Value         0.9964   0.9719   0.9834   0.9741   0.9824
+Neg Pred Value         0.9936   0.9945   0.9942   0.9965   0.9998
+Prevalence             0.2880   0.1925   0.1762   0.1624   0.1808
+Detection Rate         0.2834   0.1881   0.1715   0.1596   0.1806
+Detection Prevalence   0.2845   0.1935   0.1743   0.1638   0.1839
+Balanced Accuracy      0.9913   0.9852   0.9847   0.9886   0.9976
+```
+
+Accuracy and Kappa: 
+```{r eval=FALSE}
+accuracyGbm <- postResample(predictGbm, crossValidationData$classe)
+accuracyGbm
+```
+
+```{r eval=FALSE}
+ Accuracy     Kappa 
+0.9831776 0.9787122 
+```
+
+```{r eval=FALSE}
+outOfSampleErrorGbm <- 1 - as.numeric(confusionMatrix(crossValidationData$classe, predictGbm)$overall[1])
+outOfSampleErrorGbm
+```
+
+```{r eval=FALSE}
+[1] 0.01682243
+```
+
+##Predicting with the models
+
+I used the random forest and boosted tree models to predict the outcomes for the test data. Both predictions resulted in the same values.
+```{r eval=FALSE}
+rfPred <- predict(rf, testing)
+rfPred
+
+gbmPred <- predict(gbm, testing)
+gbmPred
+```
+
+The predicted results are:  
+
+```{r eval=FALSE}
+ [1] B A B A A E D B A A B C B A E E A B B B
+Levels: A B C D E
+```
